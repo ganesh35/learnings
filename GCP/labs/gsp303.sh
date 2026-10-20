@@ -50,7 +50,7 @@ up() {
       echo "waiting for $vm guest agent ($i/20)..."; sleep 30
     done
   done
-  echo "Done. IIS installs on first boot of vm-securehost (~5 min) - then click Check my progress."
+  echo "Done. IIS installs on first boot of vm-securehost (~8-10 min: boot, reboot, then startup script) - then click Check my progress."
 }
 
 down() {
