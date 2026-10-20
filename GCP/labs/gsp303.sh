@@ -56,8 +56,13 @@ up() {
 down() {
   # Leaves deny-all-egress/default-allow-rdp deleted on purpose (they break the checker).
   gcloud compute instances delete vm-securehost vm-bastionhost --zone="$ZONE" --quiet || true
-  gcloud compute firewall-rules delete allow-rdp-traffic --quiet || true
-  gcloud compute networks subnets delete securesubnet --region="$REGION" --quiet || true
+  # By network, not name, so rules/subnets from earlier manual attempts go too.
+  rules=$(gcloud compute firewall-rules list --filter='network~/securenetwork$' --format='value(name)')
+  # shellcheck disable=SC2086
+  [ -z "$rules" ] || gcloud compute firewall-rules delete $rules --quiet
+  subnets=$(gcloud compute networks subnets list --filter='network~/securenetwork$' --format='value(name)')
+  # shellcheck disable=SC2086
+  [ -z "$subnets" ] || gcloud compute networks subnets delete $subnets --region="$REGION" --quiet
   gcloud compute networks delete securenetwork --quiet || true
 }
 
