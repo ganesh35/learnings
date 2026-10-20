@@ -1,68 +1,51 @@
 #!/bin/sh
-# GSP303 — Configure Secure RDP using a Windows Bastion Host (Challenge Lab).
-# Run in Cloud Shell of the lab project:  sh gsp303.sh up | down | redo
+# GSP303 Secure RDP via Windows bastion host. Run in Cloud Shell: sh gsp303.sh up|down|redo
 set -eu
-(set -o pipefail) 2>/dev/null && set -o pipefail
 
-PROJECT=$(gcloud config get-value project 2>/dev/null)
-# The manual's region/zone placeholders render empty; the lab sets them in project metadata.
-ZONE=$(gcloud compute project-info describe --project "$PROJECT" \
+# The lab page leaves region/zone blank; the project metadata has them.
+ZONE=$(gcloud compute project-info describe \
   --format='value(commonInstanceMetadata.items.google-compute-default-zone)')
-: "${ZONE:?no default zone in project metadata - export ZONE=<zone> and retry}"
 REGION=${ZONE%-*}
-IMAGE='--image-project=windows-cloud --image-family=windows-2016 --boot-disk-size=50GB --machine-type=e2-medium'
-IIS='windows-startup-script-ps1=Install-WindowsFeature -Name Web-Server -IncludeManagementTools'
-echo "project=$PROJECT region=$REGION zone=$ZONE"
+VM="--zone=$ZONE --machine-type=e2-medium --image-project=windows-cloud --image-family=windows-2016 --boot-disk-size=50GB"
 
 up() {
-  # Task 1: VPC, subnet, RDP rule (tag-scoped to the bastion)
   gcloud compute networks create securenetwork --subnet-mode=custom
-  gcloud compute networks subnets create securesubnet --network=securenetwork \
-    --region="$REGION" --range=192.168.16.0/20
+  gcloud compute networks subnets create securesubnet --network=securenetwork --region="$REGION" --range=192.168.16.0/20
   gcloud compute firewall-rules create allow-rdp-traffic --network=securenetwork \
-    --direction=INGRESS --allow=tcp:3389 --source-ranges=0.0.0.0/0 --target-tags=allow-rdp-traffic
+    --allow=tcp:3389 --source-ranges=0.0.0.0/0 --target-tags=allow-rdp-traffic
 
-  # Checker bugs: checks 3/5 crash while deny-all-egress exists, and check 3 fails
-  # if any other tcp:3389 rule exists in the project.
+  # These lab rules break the checker when present.
   for r in deny-all-egress default-allow-rdp; do
-    gcloud compute firewall-rules describe "$r" >/dev/null 2>&1 \
-      && gcloud compute firewall-rules delete "$r" --quiet
+    gcloud compute firewall-rules delete "$r" --quiet 2>/dev/null || true
   done
 
-  # Task 2: secure host (internal only on both NICs; IIS via startup script = Task 3)
+  # Startup script installs IIS, so no RDP session is needed.
   # shellcheck disable=SC2086
-  gcloud compute instances create vm-securehost --zone="$ZONE" $IMAGE \
-    --network-interface=network=securenetwork,subnet=securesubnet,no-address \
-    --network-interface=network=default,subnet=default,no-address \
-    --metadata="$IIS"
-  # Bastion: external IP on securenetwork NIC, internal only on default
+  gcloud compute instances create vm-securehost $VM \
+    --network-interface=subnet=securesubnet,no-address \
+    --network-interface=subnet=default,no-address \
+    --metadata='windows-startup-script-ps1=Install-WindowsFeature -Name Web-Server -IncludeManagementTools'
   # shellcheck disable=SC2086
-  gcloud compute instances create vm-bastionhost --zone="$ZONE" $IMAGE \
-    --network-interface=network=securenetwork,subnet=securesubnet \
-    --network-interface=network=default,subnet=default,no-address \
-    --tags=allow-rdp-traffic
+  gcloud compute instances create vm-bastionhost $VM --tags=allow-rdp-traffic \
+    --network-interface=subnet=securesubnet \
+    --network-interface=subnet=default,no-address
 
-  # Passwords (only needed for RDP; Windows takes a few minutes before this works)
+  # Retry until Windows is ready to accept the password reset.
   for vm in vm-bastionhost vm-securehost; do
-    i=0
-    until gcloud compute reset-windows-password "$vm" --zone="$ZONE" --user=app-admin --quiet; do
-      i=$((i + 1)); [ "$i" -ge 20 ] && { echo "password reset for $vm failed" >&2; exit 1; }
-      echo "waiting for $vm guest agent ($i/20)..."; sleep 30
-    done
+    until gcloud compute reset-windows-password "$vm" --zone="$ZONE" --user=app-admin --quiet; do sleep 30; done
   done
-  echo "Done. IIS installs on first boot of vm-securehost (~8-10 min: boot, reboot, then startup script) - then click Check my progress."
+  echo "Done. IIS is ready ~8-10 min after VM creation; then click Check my progress."
 }
 
 down() {
-  # Leaves deny-all-egress/default-allow-rdp deleted on purpose (they break the checker).
   gcloud compute instances delete vm-securehost vm-bastionhost --zone="$ZONE" --quiet || true
-  # By network, not name, so rules/subnets from earlier manual attempts go too.
-  rules=$(gcloud compute firewall-rules list --filter='network~/securenetwork$' --format='value(name)')
-  # shellcheck disable=SC2086
-  [ -z "$rules" ] || gcloud compute firewall-rules delete $rules --quiet
-  subnets=$(gcloud compute networks subnets list --filter='network~/securenetwork$' --format='value(name)')
-  # shellcheck disable=SC2086
-  [ -z "$subnets" ] || gcloud compute networks subnets delete $subnets --region="$REGION" --quiet
+  # Delete by network so leftovers from manual attempts go too.
+  for r in $(gcloud compute firewall-rules list --filter='network~/securenetwork$' --format='value(name)'); do
+    gcloud compute firewall-rules delete "$r" --quiet
+  done
+  for s in $(gcloud compute networks subnets list --filter='network~/securenetwork$' --format='value(name)'); do
+    gcloud compute networks subnets delete "$s" --region="$REGION" --quiet
+  done
   gcloud compute networks delete securenetwork --quiet || true
 }
 
